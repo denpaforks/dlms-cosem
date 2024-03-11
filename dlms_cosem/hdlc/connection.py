@@ -170,7 +170,7 @@ class HdlcConnection:
         """
         try:
             frame_end = (
-                self.buffer.index(frames.HDLC_FLAG, self.buffer_search_position) + 1
+                self.buffer.rfind(frames.HDLC_FLAG, self.buffer_search_position) + 1
             )
         except ValueError:
             # .index raises ValueError on not finding subsection
