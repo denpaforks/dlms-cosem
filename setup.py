@@ -16,7 +16,7 @@ PROJECT_URLS = {
 EMAIL = "henrik@pwit.se"
 AUTHOR = "Henrik Palmlund Wahlgren @ Palmlund Wahlgren Innovative Technology AB"
 REQUIRES_PYTHON = "~=3.7"
-VERSION = "24.1.0"
+VERSION = "24.1.0.2024031101"
 
 # What packages are required for this module to be executed?
 REQUIRED = [
@@ -53,7 +53,6 @@ CLASSIFIERS = [
     "Programming Language :: Python :: Implementation :: CPython",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Communications",
-
 ]
 
 here = os.path.abspath(os.path.dirname(__file__))
