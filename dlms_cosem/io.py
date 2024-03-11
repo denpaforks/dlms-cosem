@@ -6,21 +6,20 @@ import time
 from typing import Optional, Tuple
 
 from dlms_cosem.hdlc import connection, address, state, frames
-from dlms_cosem.protocol.wrappers import WrapperHeader, WrapperProtocolDataUnit
+from dlms_cosem.hdlc.fields import DlmsHdlcFrameFormatField
 
 if sys.version_info < (3, 8):
     from typing_extensions import Protocol
 else:
     from typing import Protocol
 
-import attr
-import serial
-
-from dlms_cosem import exceptions
-
 from typing import *
 
+import attr
+import serial
 import structlog
+
+from dlms_cosem import exceptions
 
 if TYPE_CHECKING:
     pass
@@ -75,8 +74,7 @@ class SerialIO:
     def connect(self):
         if self.serial_port:
             raise RuntimeError(
-                f"Trying to open port {self.port_name} when the port "
-                f"already is open"
+                f"Trying to open port {self.port_name} when the port already is open"
             )
         self.serial_port = serial.Serial(
             port=self.port_name, baudrate=self.baud_rate, timeout=self.timeout
@@ -464,7 +462,8 @@ class HdlcTransport:
         if in_bytes == frames.HDLC_FLAG:
             # We found the first HDLC Frame Flag. We should read until the last one.
             in_bytes += self.io.recv_until(frames.HDLC_FLAG)
-            while not frames.frame_has_correct_length(in_bytes[2], in_bytes):
+            length = DlmsHdlcFrameFormatField.get_length_from_bytes(in_bytes[1:3])
+            while not frames.frame_has_correct_length(length, in_bytes):
                 # We have more data to read.
                 in_bytes += self.io.recv_until(frames.HDLC_FLAG)
 
