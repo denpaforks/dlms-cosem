@@ -453,6 +453,9 @@ class HdlcTransport:
         if in_bytes == frames.HDLC_FLAG:
             # We found the first HDLC Frame Flag. We should read until the last one.
             in_bytes += self.io.recv_until(frames.HDLC_FLAG)
+            while not frames.frame_has_correct_length(in_bytes[2], in_bytes):
+                # We have more data to read.
+                in_bytes += self.io.recv_until(frames.HDLC_FLAG)
 
         LOG.debug("Received data", data=in_bytes, transport=self)
 
