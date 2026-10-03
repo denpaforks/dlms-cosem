@@ -17,6 +17,10 @@ from typing import *
 
 import attr
 import serial
+try:
+    import serialx
+except ImportError:
+    serialx = None  # type: ignore[assignment]
 import structlog
 
 from dlms_cosem import exceptions
@@ -104,6 +108,91 @@ class SerialIO:
         else:
             raise RuntimeError("Trying to read data from closed serial port")
         return data
+
+
+@attr.s(auto_attribs=True)
+class SerialXIO:
+    """
+    Serial IO implementation powered by serialx.
+
+    Supports local serial ports (e.g. 'COM1', '/dev/ttyUSB0'), standard serialx
+    URLs (e.g. 'socket://', 'tcp://', 'rfc2217://'), and custom registered schemes
+    (such as Home Assistant's 'esphome-hass://' or 'esphome://').
+    """
+
+    port_url: str
+    baud_rate: int = attr.ib(default=9600)
+    timeout: int = attr.ib(default=10)
+    connection_kwargs: dict[str, Any] = attr.ib(factory=dict)
+
+    serial_port: Optional[Any] = attr.ib(init=False, default=None)
+
+    def __attrs_post_init__(self):
+        if serialx is None:
+            raise ImportError(
+                "serialx is required to use SerialXIO. "
+                "Please install serialx (e.g. 'pip install serialx')."
+            )
+
+    def connect(self):
+        if self.serial_port:
+            raise RuntimeError(
+                f"Trying to open port {self.port_url} when the port already is open"
+            )
+        try:
+            self.serial_port = serialx.serial_for_url(
+                self.port_url,
+                baudrate=self.baud_rate,
+                timeout=self.timeout,
+                **self.connection_kwargs,
+            )
+            if not self.serial_port.is_open:
+                self.serial_port.open()
+        except (serialx.SerialException, OSError) as e:
+            self.serial_port = None
+            raise exceptions.CommunicationError(
+                f"Unable to open serial port {self.port_url}"
+            ) from e
+
+    def disconnect(self):
+        if self.serial_port:
+            try:
+                self.serial_port.close()
+            except (serialx.SerialException, OSError) as e:
+                raise exceptions.CommunicationError from e
+            finally:
+                self.serial_port = None
+
+    def send(self, data: bytes) -> None:
+        if not self.serial_port:
+            raise RuntimeError("Trying to send data on closed serial port")
+        try:
+            self.serial_port.write(data)
+            self.serial_port.flush()
+        except (serialx.SerialException, OSError) as e:
+            raise exceptions.CommunicationError("Could not send data") from e
+
+    def recv(self, amount: int = 1) -> bytes:
+        if not self.serial_port:
+            raise RuntimeError("Trying to read data from closed serial port")
+        data = b""
+        while len(data) < amount:
+            try:
+                chunk = self.serial_port.read(amount - len(data))
+            except (serialx.SerialException, OSError) as e:
+                raise exceptions.CommunicationError("Could not receive data") from e
+            if not chunk:
+                break
+            data += chunk
+        return data
+
+    def recv_until(self, end: bytes) -> bytes:
+        if not self.serial_port:
+            raise RuntimeError("Trying to read data from closed serial port")
+        try:
+            return self.serial_port.read_until(end)
+        except (serialx.SerialException, OSError) as e:
+            raise exceptions.CommunicationError("Could not receive data") from e
 
 
 @attr.s(auto_attribs=True)

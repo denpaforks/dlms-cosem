@@ -40,6 +40,7 @@ dependencies = [
   "python-dateutil>=2.8.1",
   "typing-extensions>=3.10",
   "structlog>=22.1.0",
+  "serialx>=0.1.0",
 ]
 
 [project.optional-dependencies]
