@@ -1,5 +1,6 @@
 from __future__ import annotations  # noqa
 
+import asyncio
 import socket
 import sys
 import time
@@ -179,6 +180,8 @@ class SerialXIO:
         while len(data) < amount:
             try:
                 chunk = self.serial_port.read(amount - len(data))
+            except (asyncio.IncompleteReadError, TimeoutError, getattr(serialx, "SerialTimeoutException", ())):
+                break
             except (serialx.SerialException, OSError) as e:
                 raise exceptions.CommunicationError("Could not receive data") from e
             if not chunk:
@@ -191,6 +194,10 @@ class SerialXIO:
             raise RuntimeError("Trying to read data from closed serial port")
         try:
             return self.serial_port.read_until(end)
+        except asyncio.IncompleteReadError as e:
+            return e.partial
+        except (TimeoutError, getattr(serialx, "SerialTimeoutException", ())):
+            return b""
         except (serialx.SerialException, OSError) as e:
             raise exceptions.CommunicationError("Could not receive data") from e
 
@@ -437,7 +444,7 @@ class HdlcTransport:
             event = self.hdlc_connection.next_event()
             if event is state.NEED_DATA:
                 if time.monotonic() >= timeout_at:
-                    raise exceptions.CommunicationError(
+                    raise exceptions.CommunicationTimeoutError(
                         f"Timed out waiting for HDLC response after {self.timeout} seconds"
                     )
 

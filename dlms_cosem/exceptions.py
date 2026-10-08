@@ -26,6 +26,10 @@ class CommunicationError(Exception):
     """Something went wrong in the communication with a meter"""
 
 
+class CommunicationTimeoutError(CommunicationError, TimeoutError):
+    """Timed out while communicating with the meter"""
+
+
 class CryptographyError(Exception):
     """Something went wrong then applying a cryptographic function"""
 
