@@ -423,10 +423,12 @@ class HdlcTransport:
             source_address=self.client_hdlc_address,
         )
 
-        self.out_buffer += self.hdlc_connection.send(disc)
-        self.drain_out_buffer()
-        response = self.next_event()
-        self.io.disconnect()
+        try:
+            self.out_buffer += self.hdlc_connection.send(disc)
+            self.drain_out_buffer()
+            response = self.next_event()
+        finally:
+            self.io.disconnect()
         return response
 
     def next_event(self):
