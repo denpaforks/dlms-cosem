@@ -7,6 +7,7 @@ import time
 from typing import Optional, Tuple
 
 from dlms_cosem.hdlc import connection, address, state, frames
+from dlms_cosem.hdlc.exceptions import HdlcException, LocalProtocolError
 from dlms_cosem.hdlc.fields import DlmsHdlcFrameFormatField
 
 if sys.version_info < (3, 8):
@@ -25,6 +26,7 @@ except ImportError:
 import structlog
 
 from dlms_cosem import exceptions
+from dlms_cosem.protocol.wrappers import WrapperHeader, WrapperProtocolDataUnit
 
 if TYPE_CHECKING:
     pass
@@ -50,6 +52,8 @@ class IoImplementation(Protocol):
 
     def recv_until(self, end: bytes) -> bytes: ...
 
+    def flush_input(self) -> None: ...
+
 
 class DlmsTransport(Protocol):
     """
@@ -60,6 +64,8 @@ class DlmsTransport(Protocol):
     server_logical_address: int
     io: IoImplementation
     timeout: int
+    retries: int
+    retry_delay: float
 
     def connect(self) -> None: ...
 
@@ -89,6 +95,13 @@ class SerialIO:
         if self.serial_port:
             self.serial_port.close()
         self.serial_port = None
+
+    def flush_input(self) -> None:
+        if self.serial_port:
+            try:
+                self.serial_port.reset_input_buffer()
+            except Exception:
+                pass
 
     def send(self, data: bytes) -> None:
         if self.serial_port:
@@ -163,6 +176,13 @@ class SerialXIO:
                 raise exceptions.CommunicationError from e
             finally:
                 self.serial_port = None
+
+    def flush_input(self) -> None:
+        if self.serial_port:
+            try:
+                self.serial_port.reset_input_buffer()
+            except Exception:
+                pass
 
     def send(self, data: bytes) -> None:
         if not self.serial_port:
@@ -254,6 +274,9 @@ class BlockingTcpIO:
             self.tcp_socket = None
             LOG.info(f"Connection to {self.address} is closed")
 
+    def flush_input(self) -> None:
+        pass
+
     def send(self, data: bytes):
         """
         Sends a whole DLMS APDU wrapped in the DLMS IP Wrapper.
@@ -298,6 +321,8 @@ class IPTransport:
     server_logical_address: int
     io: IoImplementation
     timeout: int = attr.ib(default=10)
+    retries: int = attr.ib(default=3)
+    retry_delay: float = attr.ib(default=0.5)
 
     def wrap(self, bytes_to_wrap: bytes) -> bytes:
         """
@@ -324,10 +349,29 @@ class IPTransport:
         Sends a whole DLMS APDU wrapped in the DLMS IP Wrapper.
         """
         wrapped = self.wrap(bytes_to_send)
-        LOG.debug("Sending data", data=wrapped, transport=self)
-        self.io.send(self.wrap(bytes_to_send))
+        last_error: Exception | None = None
+        for attempt in range(self.retries + 1):
+            try:
+                LOG.debug("Sending data", data=wrapped, transport=self)
+                self.io.send(wrapped)
+                return self.recv_response()
+            except (exceptions.CommunicationError, TimeoutError, OSError) as err:
+                last_error = err
+                if attempt >= self.retries:
+                    raise
+                LOG.warning(
+                    "IP transport request failed, retrying",
+                    attempt=attempt + 1,
+                    max_retries=self.retries,
+                    error=str(err),
+                )
+                if hasattr(self.io, "flush_input"):
+                    self.io.flush_input()
+                if self.retry_delay > 0:
+                    time.sleep(self.retry_delay)
 
-        return self.recv_response()
+        if last_error:
+            raise last_error
 
     def recv_response(self) -> bytes:
         """
@@ -359,6 +403,8 @@ class HdlcTransport:
     client_physical_address: Optional[int] = attr.ib(default=None)
     extended_addressing: bool = attr.ib(default=False)
     timeout: int = attr.ib(default=10)
+    retries: int = attr.ib(default=3)
+    retry_delay: float = attr.ib(default=0.5)
     hdlc_connection: connection.HdlcConnection = attr.ib(
         default=attr.Factory(
             lambda self: connection.HdlcConnection(
@@ -390,6 +436,38 @@ class HdlcTransport:
             extended_addressing=self.extended_addressing,
         )
 
+    def _flush_io(self) -> None:
+        if hasattr(self.io, "flush_input"):
+            try:
+                self.io.flush_input()
+            except Exception:
+                pass
+        elif hasattr(self.io, "serial_port") and self.io.serial_port:
+            if hasattr(self.io.serial_port, "reset_input_buffer"):
+                try:
+                    self.io.serial_port.reset_input_buffer()
+                except Exception:
+                    pass
+
+    def _reset_attempt(
+        self,
+        server_ssn: int,
+        server_rsn: int,
+        client_ssn: int,
+        client_rsn: int,
+        connection_state: Any,
+    ) -> None:
+        self.hdlc_connection.server_ssn = server_ssn
+        self.hdlc_connection.server_rsn = server_rsn
+        self.hdlc_connection.client_ssn = client_ssn
+        self.hdlc_connection.client_rsn = client_rsn
+        self.hdlc_connection.state.current_state = connection_state
+        self.out_buffer.clear()
+        self.in_buffer.clear()
+        self.hdlc_connection.buffer.clear()
+        self.hdlc_connection.buffer_search_position = 1
+        self._flush_io()
+
     def connect(self):
         """
         Sets up the HDLC Connection by sending a SNRM request.
@@ -408,10 +486,42 @@ class HdlcTransport:
             destination_address=self.server_hdlc_address,
             source_address=self.client_hdlc_address,
         )
-        self.out_buffer += self.hdlc_connection.send(snrm)
-        self.drain_out_buffer()
-        ua_response = self.next_event()
-        return ua_response
+
+        last_error: Exception | None = None
+        for attempt in range(self.retries + 1):
+            try:
+                self.hdlc_connection.state.current_state = state.NOT_CONNECTED
+                self.out_buffer.clear()
+                self.in_buffer.clear()
+                self.hdlc_connection.buffer.clear()
+                self.hdlc_connection.buffer_search_position = 1
+                self._flush_io()
+
+                self.out_buffer += self.hdlc_connection.send(snrm)
+                self.drain_out_buffer()
+                ua_response = self.next_event()
+                return ua_response
+            except (
+                exceptions.CommunicationError,
+                HdlcException,
+                LocalProtocolError,
+                TimeoutError,
+                OSError,
+            ) as err:
+                last_error = err
+                if attempt >= self.retries:
+                    raise
+                LOG.warning(
+                    "SNRM connect failed, retrying",
+                    attempt=attempt + 1,
+                    max_retries=self.retries,
+                    error=str(err),
+                )
+                if self.retry_delay > 0:
+                    time.sleep(self.retry_delay)
+
+        if last_error:
+            raise last_error
 
     def disconnect(self):
         """
@@ -458,16 +568,7 @@ class HdlcTransport:
                 continue
             return event
 
-    def send_request(self, telegram: bytes) -> bytes:
-        """
-        Send will make sure the data that needs to be sent i sent.
-        The send is the only public function that will return the response data
-        when received in full.
-        Send will handle fragmentation of data if data is to large to be sent in a
-        single HDLC frame.
-        :param telegram:
-        :return:
-        """
+    def _send_request_once(self, telegram: bytes) -> bytes:
         # prepend the LLC
         # The LLC should only be present in the first segmented information frame.
         # So instead we just prepend the data with it we know it will only be in the
@@ -502,6 +603,56 @@ class HdlcTransport:
             raise ValueError("The data is not prepended by the LLC response header")
         # don't return the LLC
         return in_buffer[3:]
+
+    def send_request(self, telegram: bytes) -> bytes:
+        """
+        Send will make sure the data that needs to be sent is sent.
+        The send is the only public function that will return the response data
+        when received in full.
+        Send will handle fragmentation of data if data is too large to be sent in a
+        single HDLC frame. Retries will be performed if the transmission fails.
+        :param telegram:
+        :return:
+        """
+        saved_server_ssn = self.hdlc_connection.server_ssn
+        saved_server_rsn = self.hdlc_connection.server_rsn
+        saved_client_ssn = self.hdlc_connection.client_ssn
+        saved_client_rsn = self.hdlc_connection.client_rsn
+        saved_state = self.hdlc_connection.state.current_state
+
+        last_error: Exception | None = None
+        for attempt in range(self.retries + 1):
+            try:
+                return self._send_request_once(telegram)
+            except (
+                exceptions.CommunicationError,
+                HdlcException,
+                LocalProtocolError,
+                ValueError,
+                TimeoutError,
+                OSError,
+            ) as err:
+                last_error = err
+                if attempt >= self.retries:
+                    raise
+                LOG.warning(
+                    "HDLC request failed, retrying",
+                    attempt=attempt + 1,
+                    max_retries=self.retries,
+                    error=str(err),
+                )
+                self._reset_attempt(
+                    saved_server_ssn,
+                    saved_server_rsn,
+                    saved_client_ssn,
+                    saved_client_rsn,
+                    saved_state,
+                )
+                if self.retry_delay > 0:
+                    time.sleep(self.retry_delay)
+
+        if last_error:
+            raise last_error
 
     def drain_out_buffer(self):
         """

@@ -46,6 +46,8 @@ class DlmsClient:
     invoke_id_confirmed: bool = attr.ib(default=True)
     invoke_id_high_priority: bool = attr.ib(default=True)
     connection_settings: Optional[DlmsConnectionSettings] = attr.ib(default=None)
+    retries: Optional[int] = attr.ib(default=None)
+    retry_delay: Optional[float] = attr.ib(default=None)
 
     dlms_connection: DlmsConnection = attr.ib(
         default=attr.Factory(
@@ -65,6 +67,12 @@ class DlmsClient:
             takes_self=True,
         )
     )
+
+    def __attrs_post_init__(self):
+        if self.retries is not None and hasattr(self.transport, "retries"):
+            self.transport.retries = self.retries
+        if self.retry_delay is not None and hasattr(self.transport, "retry_delay"):
+            self.transport.retry_delay = self.retry_delay
 
     @contextlib.contextmanager
     def session(self) -> Generator["DlmsClient", Any, None]:
